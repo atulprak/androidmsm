@@ -1,6 +1,8 @@
 #
 # Makefile for misc devices that really don't fit anywhere else.
 #
+CFLAGS_qseecom.o := -DDEBUG
+
 
 obj-$(CONFIG_IBM_ASM)		+= ibmasm/
 obj-$(CONFIG_AD525X_DPOT)	+= ad525x_dpot.o
@@ -55,9 +57,11 @@ obj-$(CONFIG_SRAM)		+= sram.o
 obj-y				+= mic/
 obj-$(CONFIG_GENWQE)		+= genwqe/
 obj-$(CONFIG_QSEECOM) += qseecom.o
+CFLAGS_qseecom.o := -DDEBUG
 obj-$(CONFIG_HDCP_QSEECOM) += hdcp.o
 ifdef CONFIG_COMPAT
 obj-$(CONFIG_QSEECOM) += compat_qseecom.o
+CFLAGS_compat_qseecom.o := -DDEBUG
 endif
 obj-$(CONFIG_ECHO)		+= echo/
 obj-$(CONFIG_VEXPRESS_SYSCFG)	+= vexpress-syscfg.o
