@@ -18,6 +18,7 @@
 #define DEBUG
 #endif
 
+
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
@@ -54,6 +55,13 @@
 
 #include <linux/compat.h>
 #include "compat_qseecom.h"
+#include <linux/types.h>
+
+/* Added to support in-kernel fuzzing */
+static u32 fuzzflag = 0;
+static bool debugfs_enabled = false;
+struct dentry *fuzzflag_entry = NULL;
+
 
 #define QSEECOM_DEV			"qseecom"
 #define QSEOS_VERSION_14		0x14
@@ -6696,6 +6704,20 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	pr_warn("qseecom_ioctl: cmd = %d\n", cmd);
 
 	switch (cmd) {
+		/*
+	case QSEECOM_FUZZ_ENABLE: {
+	  pr_warn("qseecom_fuzz enabled\n");
+	  qseecom_fuzz = true;
+	  break;
+	}
+	  
+	case QSEECOM_FUZZ_DISABLE: {
+	  pr_warn("qseecom_fuzz disabled\n");
+	  qseecom_fuzz = false;
+	  break;
+	}
+		*/
+	  
 	case QSEECOM_IOCTL_REGISTER_LISTENER_REQ: {
 	  pr_warn("qseecom_ioctl: cmd = QSEECOM_IOCTL_REGISTER_LISTENER_REQ, data->type = %d\n", data->type);
 		if (data->type != QSEECOM_GENERIC)
@@ -8739,13 +8761,34 @@ static struct platform_driver qseecom_plat_driver = {
 	},
 };
 
+
+// /sys/kernel/debug/qseecom
+static struct dentry *debugdir = NULL;
+
+	
+
 static int qseecom_init(void)
 {
+	// Added code
+	debugdir = debugfs_create_dir("qseecom_debug", 0);
+	if (!debugdir) {
+		pr_warn("Unable to create /sys/kernel/qseecom_debug");
+	} else {
+		fuzzflag_entry = debugfs_create_u32("fuzzflag", 0666, debugdir, &fuzzflag);
+		if (!fuzzflag_entry) {
+			pr_warn("Unable to create /sys/kernel/qseecom_debug/fuzzflag to support user-mode setting of fuzzflag");
+		} else {
+			debugfs_enabled = true;
+			pr_warn("To disable or enable fuzzing: write 0 or 1 to /sys/kernel/qseecom_debug/fuzzflag.\n");
+		}
+	}
+	// Original code below.
 	return platform_driver_register(&qseecom_plat_driver);
 }
 
 static void qseecom_exit(void)
 {
+	debugfs_remove_recursive(debugdir);
 	platform_driver_unregister(&qseecom_plat_driver);
 }
 
