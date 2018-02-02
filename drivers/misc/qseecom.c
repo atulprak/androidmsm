@@ -27,6 +27,7 @@
 #include <linux/debugfs.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
+#include <linux/printk.h>
 #include <linux/sched.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
@@ -41,6 +42,7 @@
 #include <linux/scatterlist.h>
 #include <linux/regulator/consumer.h>
 #include <linux/dma-mapping.h>
+#include <linux/random.h>
 #include <soc/qcom/subsystem_restart.h>
 #include <soc/qcom/scm.h>
 #include <soc/qcom/socinfo.h>
@@ -58,9 +60,12 @@
 #include <linux/types.h>
 
 /* Added to support in-kernel fuzzing */
-static u32 fuzzflag = 0;
+static u8 fuzzprobability = 0;  // This value can be set to any value by writing to /sys/kernel/debug/qseecom_debug/fuzzprobability. The value determines
+                          // how many times each command is mutated for every invocation.
 static bool debugfs_enabled = false;
-struct dentry *fuzzflag_entry = NULL;
+struct dentry *fuzzprobability_entry = NULL;
+struct dentry *fuzzreplayflag_entry = NULL;
+struct dentry *fuzzmutationmask_entry = NULL;
 
 
 #define QSEECOM_DEV			"qseecom"
@@ -381,6 +386,108 @@ static int qseecom_free_ce_info(struct qseecom_dev_handle *data,
 						void __user *argp);
 static int qseecom_query_ce_info(struct qseecom_dev_handle *data,
 						void __user *argp);
+
+
+/* To cause printing at KERN_DEBUG level, which is what print_hex_dump_bytes requires, 
+   you need to set the debug level for kernel messages to 8 (Note: KERN_DEBUG corresponds to level 7).
+
+   To do that, issue the following command within adb shell for the device: 
+
+   dmesg -n 8
+
+   Another way is to do the following:
+
+   echo 8 > /proc/sys/kernel/printk
+
+  To reset it back to print KERN_WARNING (4) or more severe messages, set the level to 5:
+  dmesg -n 5
+
+*/
+
+void print_hex(char *str, uint32_t smc_id, void *bytearray, size_t len) {
+	pr_debug("debug: str = %s, len = %lu\n", str,  len);
+	pr_debug("\n______\nsmc_id = %d\n", smc_id);
+	print_hex_dump_bytes("", DUMP_PREFIX_NONE, bytearray, len); // kernel built-in function
+	pr_debug("\n------\n");
+}
+
+
+static void fuzz_cmd(uint32_t smc_id, struct scm_desc *desc) {
+	// Try simply fuzzing first. Modify bytes in desc randomly.
+	size_t descsize = sizeof(struct scm_desc);
+	uint32_t i;
+	struct scm_desc desccopy;
+	u8 *descptr;
+	u8 newbyte;
+	u8 rand;
+	int ret = 0;
+	struct qseecom_command_scm_resp scm_resp;
+
+	// Here, the goal is to fuzz the desc part, leaving the command as is. The hope is that
+	// the mutated command will fail and return an error. If it succeeds for some reason,
+	// we want to record the change so that it can be replayed later, possibly.
+
+	// fuzzprobability can be used to control the amount of mutation. If the random value is < fuzzprobability,
+	// we mutate a byte. So, choosing fuzzprobability to be 0x80 will lead to roughly 50% probability of mutating
+	// a byte desc. The overall probability of mutation is going to be much higher and very close to 1 since desc contains many
+	// bytes and each byte is mutated independently. But, choosing a smaller fuzzprobability value may be useful for a more controlled
+	// change.
+	
+	
+	memcpy(&desccopy, desc, descsize);
+
+
+	print_hex("scm_desc before change: ", smc_id, (void *) desc, sizeof(struct scm_desc));
+
+
+	for (i = 0; i < descsize; i++) {
+		// For each byte, choose a different random value with
+		// probability 0.1.
+		get_random_bytes((void *) &rand, sizeof(u8));
+//		if ((rand & 0x01) == 0) { // lowest order bit is 0
+			// don't mutate
+		if (rand >= fuzzprobability) { // don't mutate. Choosing fuzzprobability to be 0 is equivalent to not-mutating.
+			i++;
+		} else {
+			// Mutate. Pick a new random byte
+			get_random_bytes((void *) &newbyte, sizeof(u8));
+			descptr = (u8 *) (&desccopy);
+			*(descptr + i) = newbyte;
+		}
+		
+	}
+	print_hex("Making mutated call: scm_desc after change: ", smc_id, (void *) &desccopy, sizeof(struct scm_desc));
+
+	scm_resp.result = desccopy.ret[0];
+	scm_resp.resp_type = desccopy.ret[1];
+	scm_resp.data = desccopy.ret[2];
+	pr_info("Mutated call before calling: smc_id = 0x%x, param_id = 0x%x, ret = %d\nscm_resp.result = 0x%x, scm_resp.resp_type = 0x%x, scm_resp.data = 0x%x\n",
+		smc_id, desccopy.arginfo, ret, scm_resp.result, scm_resp.resp_type, scm_resp.data);
+	
+	// Invoke the call and see what happens */
+        ret = scm_call2(smc_id, &desccopy);
+	scm_resp.result = desccopy.ret[0];
+	scm_resp.resp_type = desccopy.ret[1];
+	scm_resp.data = desccopy.ret[2];
+	pr_info("Mutated call result: smc_id = 0x%x, param_id = 0x%x, ret = %d\nscm_resp.result = 0x%x, scm_resp.resp_type = 0x%x, scm_resp.data = 0x%x\n",
+		smc_id, desccopy.arginfo, ret, scm_resp.result, scm_resp.resp_type, scm_resp.data);
+	// It is interesting to us if the mutated call succeeds. Find a way to save and replay that. Also, try reverse-mapping that to an ioctl????
+	// To save the results, let's create some files via debugfs to write out the original and mutated values. Perhaps, we can later find a way
+	// to read those back in and try the same mutation to see if we can reproduce the crash. We will need to make sure that we don't delete the files
+	// when the module is unloaded and to avoid resetting the file when the module is loaded.
+
+	
+
+	
+
+	// Mapping back to an ioctl is likely much more difficult since a lot goes on between when ioctl is made and the scm_call2's invocation. Revisit
+	// later.
+	
+
+	
+
+}	
+
 
 static int get_qseecom_keymaster_status(char *str)
 {
@@ -725,7 +832,11 @@ static int qseecom_scm_call2(uint32_t svc_id, uint32_t tz_cmd_id,
 				desc.args[5] = req_64bit->sglistinfo_ptr;
 				desc.args[6] = req_64bit->sglistinfo_len;
 			}
-			ret = scm_call2(smc_id, &desc);
+			// Try fuzzing the command with different argument
+			// Hopefully, all these calls fail gracefully.
+			pr_debug("calling fuzzcmd\n");
+			fuzz_cmd(smc_id, &desc);   // We expect this call to fail usually. But, if it succeeds, hopefully, no serious harm is done.
+			ret = scm_call2(smc_id, &desc);  // Now, do the actual call.
 			break;
 		}
 		case QSEOS_RPMB_PROVISION_KEY_COMMAND: {
@@ -6704,19 +6815,6 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	pr_warn("qseecom_ioctl: cmd = %d\n", cmd);
 
 	switch (cmd) {
-		/*
-	case QSEECOM_FUZZ_ENABLE: {
-	  pr_warn("qseecom_fuzz enabled\n");
-	  qseecom_fuzz = true;
-	  break;
-	}
-	  
-	case QSEECOM_FUZZ_DISABLE: {
-	  pr_warn("qseecom_fuzz disabled\n");
-	  qseecom_fuzz = false;
-	  break;
-	}
-		*/
 	  
 	case QSEECOM_IOCTL_REGISTER_LISTENER_REQ: {
 	  pr_warn("qseecom_ioctl: cmd = QSEECOM_IOCTL_REGISTER_LISTENER_REQ, data->type = %d\n", data->type);
@@ -8763,25 +8861,40 @@ static struct platform_driver qseecom_plat_driver = {
 
 
 // /sys/kernel/debug/qseecom
-static struct dentry *debugdir = NULL;
+static struct dentry *debugdir = NULL;   // This directory is removed after reboots
+
 
 	
 
 static int qseecom_init(void)
 {
 	// Added code
+	bool err = false;
 	debugdir = debugfs_create_dir("qseecom_debug", 0);
 	if (!debugdir) {
 		pr_warn("Unable to create /sys/kernel/qseecom_debug");
-	} else {
-		fuzzflag_entry = debugfs_create_u32("fuzzflag", 0666, debugdir, &fuzzflag);
-		if (!fuzzflag_entry) {
-			pr_warn("Unable to create /sys/kernel/qseecom_debug/fuzzflag to support user-mode setting of fuzzflag");
+		err = true;
+	}
+
+	if (!err) {
+		fuzzprobability_entry = debugfs_create_u8("fuzzprobability", 0666, debugdir, &fuzzprobability);
+		if (!fuzzprobability_entry) {
+			pr_warn("Unable to create /sys/kernel/qseecom_debug/fuzzprobability to support user-mode setting of fuzzprobability");
+			err = true;
 		} else {
 			debugfs_enabled = true;
-			pr_warn("To disable or enable fuzzing: write 0 or 1 to /sys/kernel/qseecom_debug/fuzzflag.\n");
+			pr_debug("To disable fuzzing: write 0 to /sys/kernel/qseecom_debug/fuzzprobability.\n");
+			pr_debug("To enable fuzzing: write a value between 1 and 255 to /sys/kernel/qseecom_debug/fuzzprobability. Mutation probability of a byte = fuzzprobability/256.0");
 		}
 	}
+	/*
+	if (!err) {
+		// Also create a file to do a replay of a previously recorded mutation, which is in the form of a mask.
+		fuzzreplay_entry = debugfs_create_bool("fuzzreplay", 0666, debugdir, &fuzzreplay);
+		
+	}
+	*/
+	
 	// Original code below.
 	return platform_driver_register(&qseecom_plat_driver);
 }
