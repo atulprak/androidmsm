@@ -439,7 +439,7 @@ static void fuzz_cmd(uint32_t smc_id, struct scm_desc *desc) {
 
 	print_hex("scm_desc before change: ", smc_id, (void *) desc, sizeof(struct scm_desc));
 
-
+	descptr = (u8 *) (&desccopy);
 	for (i = 0; i < descsize; i++) {
 		// For each byte, choose a different random value with
 		// probability 0.1.
@@ -447,12 +447,10 @@ static void fuzz_cmd(uint32_t smc_id, struct scm_desc *desc) {
 //		if ((rand & 0x01) == 0) { // lowest order bit is 0
 			// don't mutate
 		if (rand >= fuzzprobability) { // don't mutate. Choosing fuzzprobability to be 0 is equivalent to not-mutating.
-			i++;
+			continue;
 		} else {
 			// Mutate. Pick a new random byte
-			get_random_bytes((void *) &newbyte, sizeof(u8));
-			descptr = (u8 *) (&desccopy);
-			*(descptr + i) = newbyte;
+			get_random_bytes((void *) &newbyte, sizeof(u8));			*(descptr + i) = newbyte;
 		}
 		
 	}
@@ -8860,7 +8858,7 @@ static struct platform_driver qseecom_plat_driver = {
 };
 
 
-// /sys/kernel/debug/qseecom
+// /sys/kernel/debug/qseecom_debug
 static struct dentry *debugdir = NULL;   // This directory is removed after reboots
 
 
