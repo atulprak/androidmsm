@@ -51,6 +51,19 @@
 #include <linux/compat.h>
 #include "compat_qseecom.h"
 
+#define FUZZ
+
+#ifdef FUZZ
+#include <linux/types.h>
+#include <linux/random.h>
+static u8 fuzzprobability = 0;  // This value can be set to any value by writing to /sys/kernel/debug/qseecom_debug/fuzzprobability. The value determines
+                          // how many times each command is mutated for every invocation.
+static bool debugfs_enabled = false;
+struct dentry *fuzzprobability_entry = NULL;
+struct dentry *fuzzreplayflag_entry = NULL;
+struct dentry *fuzzmutationmask_entry = NULL;
+#endif
+
 #define QSEECOM_DEV			"qseecom"
 #define QSEOS_VERSION_14		0x14
 #define QSEEE_VERSION_00		0x400000
@@ -380,6 +393,94 @@ static int qseecom_free_ce_info(struct qseecom_dev_handle *data,
 						void __user *argp);
 static int qseecom_query_ce_info(struct qseecom_dev_handle *data,
 						void __user *argp);
+
+
+#ifdef FUZZ
+
+void print_hex(char *str, uint32_t smc_id, void *bytearray, size_t len) {
+	pr_debug("debug: str = %s, len = %lu\n", str,  len);
+	pr_debug("\n______\nsmc_id = %d\n", smc_id);
+	print_hex_dump_bytes("", DUMP_PREFIX_NONE, bytearray, len); // kernel built-in function
+	pr_debug("\n------\n");
+}
+
+static int fuzz_scm_call2(uint32_t smc_id, struct scm_desc *desc) {
+	// Try simply fuzzing first. Modify bytes in desc randomly.
+	size_t descsize = sizeof(struct scm_desc);
+	uint32_t i;
+	struct scm_desc desccopy;
+	u8 *descptr;
+	u8 newbyte;
+	u8 rand;
+	int ret = 0;
+	struct qseecom_command_scm_resp scm_resp;
+
+	// Here, the goal is to fuzz the desc part, leaving the command as is. The hope is that
+	// the mutated command will fail and return an error. If it succeeds for some reason,
+	// we want to record the change so that it can be replayed later, possibly.
+
+	
+
+	// Copy desc to desccopy so that desc is not corrupted by the mutation.
+	memcpy(&desccopy, desc, descsize);
+
+	// Mutate the desccopy.  fuzzprobability can be used to
+	// control the amount of mutation. If the random value is <
+	// fuzzprobability, we mutate a byte. So, choosing
+	// fuzzprobability to be 0x80 will lead to roughly 50%
+	// probability of mutating a byte desc. The overall
+	// probability of mutation is going to be much higher and very
+	// close to 1 since desc contains many bytes and each byte is
+	// mutated independently. But, choosing a smaller
+	// fuzzprobability value may be useful for a more controlled
+	// change, but take longer to induce a fault.
+
+
+	descptr = (u8 *) (&desccopy);
+	for (i = 0; i < descsize; i++) {
+		// For each byte, choose a different random value with
+		// probability 0.1.
+		get_random_bytes((void *) &rand, sizeof(u8));
+		if (rand >= fuzzprobability) { // don't mutate. Choosing fuzzprobability to be 0 is equivalent to not-mutating.
+			continue;
+		} else {
+			// Mutate. Pick a new random byte
+			get_random_bytes((void *) &newbyte, sizeof(u8));			*(descptr + i) = newbyte;
+		}
+		
+	}
+	pr_debug("--------------------------------\n");
+	pr_debug("--------------------------------\n");
+	print_hex("Making mutated call: scm_desc before change: ", smc_id, (void *) &desccopy, sizeof(struct scm_desc));
+	scm_resp.result = desccopy.ret[0];
+	scm_resp.resp_type = desccopy.ret[1];
+	scm_resp.data = desccopy.ret[2];
+	pr_debug("\nMaking mutated call: before calling: smc_id = 0x%x, param_id = 0x%x, ret = %d\nscm_resp.result = 0x%x, scm_resp.resp_type = 0x%x, scm_resp.data = 0x%x\n",
+		smc_id, desccopy.arginfo, ret, scm_resp.result,
+		scm_resp.resp_type, scm_resp.data);
+
+	pr_debug("--------------------------------\n");
+	print_hex("Making mutated call: scm_desc after mutation: ", smc_id, (void *) &desccopy, sizeof(struct scm_desc));
+
+	// Invoke the mutated call and see what happens */
+        ret = scm_call2(smc_id, &desccopy);
+	scm_resp.result = desccopy.ret[0];
+	scm_resp.resp_type = desccopy.ret[1];
+	scm_resp.data = desccopy.ret[2];
+	pr_info("Result from mutated call: smc_id = 0x%x, param_id = 0x%x, ret = %d\nscm_resp.result = 0x%x, scm_resp.resp_type = 0x%x, scm_resp.data = 0x%x\n",
+		smc_id, desccopy.arginfo, ret, scm_resp.result, scm_resp.resp_type, scm_resp.data);
+	// It is interesting to us if the mutated call succeeds. Find a way to save and replay that. Also, try reverse-mapping that to an ioctl????
+	// To save the results, let's create some files via debugfs to write out the original and mutated values. Perhaps, we can later find a way
+	// to read those back in and try the same mutation to see if we can reproduce the crash. We will need to make sure that we don't delete the files
+	// when the module is unloaded and to avoid resetting the file when the module is loaded.
+	
+
+	// Now make the actual call and return the result.
+	ret = scm_call2(smc_id, desc);
+	return ret;
+}	
+#endif
+
 
 static int get_qseecom_keymaster_status(char *str)
 {
@@ -724,7 +825,16 @@ static int qseecom_scm_call2(uint32_t svc_id, uint32_t tz_cmd_id,
 				desc.args[5] = req_64bit->sglistinfo_ptr;
 				desc.args[6] = req_64bit->sglistinfo_len;
 			}
+#ifdef FUZZ
+			// Try fuzzing the command. A fuzzed command
+			// is always followed by execution of the actual
+			// command, which is expected to succeed.
+			// Hopefully, all these calls fail gracefully.
+			pr_debug("calling fuzz_scm_call2\n");
+			ret = fuzz_scm_call2(smc_id, &desc);
+#else
 			ret = scm_call2(smc_id, &desc);
+#endif
 			break;
 		}
 		case QSEOS_RPMB_PROVISION_KEY_COMMAND: {
