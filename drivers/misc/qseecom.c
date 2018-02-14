@@ -13,6 +13,7 @@
  */
 
 #define pr_fmt(fmt) "QSEECOM: %s: " fmt, __func__
+#define DEBUG
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -381,6 +382,151 @@ static int qseecom_free_ce_info(struct qseecom_dev_handle *data,
 static int qseecom_query_ce_info(struct qseecom_dev_handle *data,
 						void __user *argp);
 
+#define FUZZ 1
+#ifdef FUZZ
+/* This function makes one fuzzed call and then follows that with the actual
+   call and returns the result from the actual call. The intent is that
+   the fuzzed call will normally fail and the actual call that follows should
+   succeed. In the event fuzzed call succeeds and causes a failure of a 
+   subsequent call or a crash in the TEEOS, that would be interesting.
+*/
+
+/* Added to support in-kernel fuzzing */
+
+// This value can be set to any value by writing to
+// /sys/kernel/debug/qseecom_debug/fuzzprobability. The value
+// determines how many times each command is mutated for every invocation.
+#include <linux/types.h>
+#include <linux/random.h>
+static u8 fuzzprobability = 0;  
+static bool debugfs_enabled = false;
+// /sys/kernel/debug/qseecom_debug
+static struct dentry *debugdir = NULL;   // This directory is removed after reboots
+static struct dentry *fuzzprobability_entry = NULL;   // File that maps to fuzzprobability variable.
+
+
+
+/* To cause printing at KERN_DEBUG level, which is what print_hex_dump_bytes requires, 
+   you need to set the debug level for kernel messages to 8 (Note: KERN_DEBUG corresponds to level 7).
+
+   To do that, issue the following command within adb shell for the device: 
+
+   dmesg -n 8
+
+   Another way is to do the following:
+
+   echo 8 > /proc/sys/kernel/printk
+
+  To reset it back to print KERN_WARNING (4) or more severe messages, set the level to 5:
+  dmesg -n 5
+
+*/
+
+void print_hex(char *str, uint32_t smc_id, void *bytearray, size_t len) {
+	pr_warn("debug: str = %s, len = %lu\n", str,  len);
+	pr_warn("\n______\nsmc_id = %d\n", smc_id);
+	print_hex_dump_bytes("", DUMP_PREFIX_NONE, bytearray, len); // kernel built-in function
+	pr_warn("\n------\n");
+}
+
+
+
+static int fuzz_scm_call2(uint32_t smc_id, struct scm_desc *desc) {
+	// Try simply fuzzing first. Modify bytes in desc randomly.
+
+	size_t descsize = sizeof(struct scm_desc);
+	uint32_t i;
+	struct scm_desc desccopy;
+	u8 *descptr;
+	u8 newbyte;
+	u8 rand;
+	int ret = 0;
+	struct qseecom_command_scm_resp scm_resp;
+	bool mutated = false;
+
+	// Here, the goal is to fuzz the desc part, leaving the command as is. The hope is that
+	// the mutated command will fail and return an error. If it succeeds for some reason,
+	// we want to record the change so that it can be replayed later, possibly.
+
+	if (fuzzprobability == 0) {
+	  pr_warn("Not fuzzing. fuzzprobability is 0\n");
+	  return 0;
+	}
+	pr_warn("Copy desc argument so that copy can be mutated");
+
+	// Copy desc to desccopy so that desc is not corrupted by the mutation.
+	memcpy(&desccopy, desc, descsize);
+
+	// Mutate the desccopy.  fuzzprobability can be used to
+	// control the amount of mutation. If the random value is <
+	// fuzzprobability, we mutate a byte. So, choosing
+	// fuzzprobability to be 0x80 will lead to roughly 50%
+	// probability of mutating a byte desc. The overall
+	// probability of mutation is going to be much higher and very
+	// close to 1 since desc contains many bytes and each byte is
+	// mutated independently. But, choosing a smaller
+	// fuzzprobability value may be useful for a more controlled
+	// change, but take longer to induce a fault.
+
+	pr_warn("Starting a mutation of desc\n");
+	descptr = (u8 *) (&desccopy);
+	for (i = 0; i < descsize; i++) {
+		// For each byte, choose a different random value with
+		// probability 0.1.
+		get_random_bytes((void *) &rand, sizeof(u8));
+		if (rand >= fuzzprobability) { // don't mutate. Choosing fuzzprobability to be 0 is equivalent to not-mutating.
+			continue;
+		} else {
+			// Mutate. Pick a new random byte
+			get_random_bytes((void *) &newbyte, sizeof(u8));
+			// pr_warn("Changing %d byte of desc from %x to %x\n", i, *(descptr + i), newbyte);
+			*(descptr + i) = newbyte;
+			mutated = true;
+		}
+		
+	}
+	pr_warn("End of one mutation of desc\n");
+
+
+	if (mutated) {
+	  /*
+	  	pr_warn("desccopy mutated\n");
+		pr_warn("--------------------------------\n");
+		pr_warn("--------------------------------\n");
+	  */
+		print_hex("Making mutated call: scm_desc before change: ", smc_id, (void *) &desccopy, sizeof(struct scm_desc));
+		scm_resp.result = desccopy.ret[0];
+		scm_resp.resp_type = desccopy.ret[1];
+		scm_resp.data = desccopy.ret[2];
+		// pr_warn("\nMaking mutated call: before calling: smc_id = 0x%x, param_id = 0x%x, ret = %d\nscm_resp.result = 0x%x, scm_resp.resp_type = 0x%x, scm_resp.data = 0x%x\n",
+		//	 smc_id, desccopy.arginfo, ret, scm_resp.result,
+		//	 scm_resp.resp_type, scm_resp.data);
+
+		pr_warn("--------------------------------\n");
+		print_hex("Making mutated call: scm_desc after mutation: ", smc_id, (void *) &desccopy, sizeof(struct scm_desc));
+		
+		// Invoke the mutated call and see what happens */
+		ret = scm_call2(smc_id, &desccopy);
+		scm_resp.result = desccopy.ret[0];
+		scm_resp.resp_type = desccopy.ret[1];
+		scm_resp.data = desccopy.ret[2];
+		pr_info("Result from mutated call: smc_id = 0x%x, param_id = 0x%x, ret = %d\nscm_resp.result = 0x%x, scm_resp.resp_type = 0x%x, scm_resp.data = 0x%x\n",
+			smc_id, desccopy.arginfo, ret, scm_resp.result, scm_resp.resp_type, scm_resp.data);
+		// It is interesting to us if the mutated call succeeds. Find a way to save and replay that. Also, try reverse-mapping that to an ioctl????
+		// To save the results, let's create some files via debugfs to write out the original and mutated values. Perhaps, we can later find a way
+		// to read those back in and try the same mutation to see if we can reproduce the crash. We will need to make sure that we don't delete the files
+		// when the module is unloaded and to avoid resetting the file when the module is loaded.
+
+	} else {
+	  // pr_warn("desccopy not mutated. Not making a mutated call\n");
+	}
+	return ret;
+}	
+
+
+#endif
+
+
 static int get_qseecom_keymaster_status(char *str)
 {
 	get_option(&str, &qseecom.is_apps_region_protected);
@@ -495,7 +641,7 @@ static int qseecom_scm_call2(uint32_t svc_id, uint32_t tz_cmd_id,
 				return -ENOMEM;
 			}
 			req = (struct qseecom_check_app_ireq *)req_buf;
-			pr_debug("Lookup app_name = %s\n", req->app_name);
+			pr_warn("Lookup app_name = %s\n", req->app_name);
 			strlcpy(tzbuf, req->app_name, sizeof(req->app_name));
 			dmac_flush_range(tzbuf, tzbuf + tzbuflen);
 			smc_id = TZ_OS_APP_LOOKUP_ID;
@@ -724,7 +870,10 @@ static int qseecom_scm_call2(uint32_t svc_id, uint32_t tz_cmd_id,
 				desc.args[5] = req_64bit->sglistinfo_ptr;
 				desc.args[6] = req_64bit->sglistinfo_len;
 			}
+	                pr_warn("Making fuzzed scm call followed by actual call\n");
+			ret = fuzz_scm_call2(smc_id, &desc);
 			ret = scm_call2(smc_id, &desc);
+			pr_warn("Returned from actual call, ret = %d\n", ret);
 			break;
 		}
 		case QSEOS_RPMB_PROVISION_KEY_COMMAND: {
@@ -1032,9 +1181,9 @@ static int qseecom_scm_call2(uint32_t svc_id, uint32_t tz_cmd_id,
 	scm_resp->result = desc.ret[0];
 	scm_resp->resp_type = desc.ret[1];
 	scm_resp->data = desc.ret[2];
-	pr_debug("svc_id = 0x%x, tz_cmd_id = 0x%x, qseos_cmd_id = 0x%x, smc_id = 0x%x, param_id = 0x%x\n",
+	pr_warn("svc_id = 0x%x, tz_cmd_id = 0x%x, qseos_cmd_id = 0x%x, smc_id = 0x%x, param_id = 0x%x\n",
 		svc_id, tz_cmd_id, qseos_cmd_id, smc_id, desc.arginfo);
-	pr_debug("scm_resp->result = 0x%x, scm_resp->resp_type = 0x%x, scm_resp->data = 0x%x\n",
+	pr_warn("scm_resp->result = 0x%x, scm_resp->resp_type = 0x%x, scm_resp->data = 0x%x\n",
 		scm_resp->result, scm_resp->resp_type, scm_resp->data);
 	return ret;
 }
@@ -1332,7 +1481,7 @@ static void qseecom_bw_inactive_req_work(struct work_struct *work)
 	mutex_lock(&qsee_bw_mutex);
 	if (qseecom.timer_running)
 		__qseecom_set_msm_bus_request(INACTIVE);
-	pr_debug("current_mode = %d, cumulative_mode = %d\n",
+	pr_warn("current_mode = %d, cumulative_mode = %d\n",
 				qseecom.current_mode, qseecom.cumulative_mode);
 	qseecom.timer_running = false;
 	mutex_unlock(&qsee_bw_mutex);
@@ -1483,8 +1632,8 @@ static int qseecom_scale_bus_bandwidth(struct qseecom_dev_handle *data,
 		ret = __qseecom_register_bus_bandwidth_needs(data, req_mode);
 		mutex_unlock(&qsee_bw_mutex);
 	} else {
-		pr_debug("Bus scaling feature is NOT enabled\n");
-		pr_debug("request bandwidth mode %d for the client\n",
+		pr_warn("Bus scaling feature is NOT enabled\n");
+		pr_warn("request bandwidth mode %d for the client\n",
 				req_mode);
 		if (req_mode != INACTIVE) {
 			ret = qseecom_perf_enable(data);
@@ -1726,7 +1875,7 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 					&send_data_rsp, ptr_svc, lstnr);
 			return -ERESTARTSYS;
 		}
-		pr_debug("waking up rcv_req_wq and waiting for send_resp_wq\n");
+		pr_warn("waking up rcv_req_wq and waiting for send_resp_wq\n");
 
 		/* initialize the new signal mask with all signals*/
 		sigfillset(&new_sigset);
@@ -1887,7 +2036,7 @@ int __qseecom_process_reentrancy_blocked_on_listener(
 		ret = -ENODATA;
 		goto exit;
 	}
-	pr_debug("lsntr %d in_use = %d\n",
+	pr_warn("lsntr %d in_use = %d\n",
 			resp->data, list_ptr->listener_in_use);
 	ptr_app->blocked_on_listener_id = resp->data;
 	/* sleep until listener is available */
@@ -1985,7 +2134,7 @@ static int __qseecom_reentrancy_process_incomplete_cmd(
 			pr_warn("Service requested does not exist\n");
 			return -ERESTARTSYS;
 		}
-		pr_debug("waking up rcv_req_wq and waiting for send_resp_wq\n");
+		pr_warn("waking up rcv_req_wq and waiting for send_resp_wq\n");
 
 		/* initialize the new signal mask with all signals*/
 		sigfillset(&new_sigset);
@@ -2193,7 +2342,7 @@ static int __qseecom_check_app_exists(struct qseecom_check_app_ireq req,
 	}
 	spin_unlock_irqrestore(&qseecom.registered_app_list_lock, flags);
 	if (found_app) {
-		pr_debug("Found app with id %d\n", entry->app_id);
+		pr_warn("Found app with id %d\n", entry->app_id);
 		*app_id = entry->app_id;
 		return 0;
 	}
@@ -2263,7 +2412,7 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 				return -EIO;
 			}
 			qseecom.commonlib_loaded = true;
-			pr_debug("cmnlib is loaded\n");
+			pr_warn("cmnlib is loaded\n");
 		}
 
 		if (!qseecom.commonlib64_loaded &&
@@ -2274,7 +2423,7 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 				return -EIO;
 			}
 			qseecom.commonlib64_loaded = true;
-			pr_debug("cmnlib64 is loaded\n");
+			pr_warn("cmnlib64 is loaded\n");
 		}
 	}
 
@@ -2300,7 +2449,7 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
 		goto loadapp_err;
 
 	if (app_id) {
-		pr_debug("App id %d (%s) already exists\n", app_id,
+		pr_warn("App id %d (%s) already exists\n", app_id,
 			(char *)(req.app_name));
 		spin_lock_irqsave(&qseecom.registered_app_list_lock, flags);
 		list_for_each_entry(entry,
@@ -2526,7 +2675,7 @@ static int qseecom_unload_app(struct qseecom_dev_handle *data,
 	}
 
 	if (!memcmp(data->client.app_name, "keymaste", strlen("keymaste"))) {
-		pr_debug("Do not unload keymaster app from tz\n");
+		pr_warn("Do not unload keymaster app from tz\n");
 		goto unload_exit;
 	}
 
@@ -2590,7 +2739,7 @@ static int qseecom_unload_app(struct qseecom_dev_handle *data,
 			goto unload_exit;
 		}
 		if (resp.result == QSEOS_RESULT_SUCCESS)
-			pr_debug("App (%d) is unloaded!!\n",
+			pr_warn("App (%d) is unloaded!!\n",
 					data->client.app_id);
 		if (resp.result == QSEOS_RESULT_INCOMPLETE) {
 			ret = __qseecom_process_incomplete_cmd(data, &resp);
@@ -2606,14 +2755,14 @@ static int qseecom_unload_app(struct qseecom_dev_handle *data,
 		spin_lock_irqsave(&qseecom.registered_app_list_lock, flags1);
 		if (app_crash) {
 			ptr_app->ref_cnt = 0;
-			pr_debug("app_crash: ref_count = 0\n");
+			pr_warn("app_crash: ref_count = 0\n");
 		} else {
 			if (ptr_app->ref_cnt == 1) {
 				ptr_app->ref_cnt = 0;
-				pr_debug("ref_count set to 0\n");
+				pr_warn("ref_count set to 0\n");
 			} else {
 				ptr_app->ref_cnt--;
-				pr_debug("Can't unload app(%d) inuse\n",
+				pr_warn("Can't unload app(%d) inuse\n",
 					ptr_app->app_id);
 			}
 		}
@@ -2769,8 +2918,8 @@ static int __validate_send_service_cmd_inputs(struct qseecom_dev_handle *data,
 	}
 
 	if ((req->cmd_req_len + req->resp_len) > data->client.sb_length) {
-		pr_debug("Not enough memory to fit cmd_buf.\n");
-		pr_debug("resp_buf. Required: %u, Available: %zu\n",
+		pr_warn("Not enough memory to fit cmd_buf.\n");
+		pr_warn("resp_buf. Required: %u, Available: %zu\n",
 				(req->cmd_req_len + req->resp_len),
 					data->client.sb_length);
 		return -ENOMEM;
@@ -2900,7 +3049,7 @@ static int qseecom_send_service_cmd(struct qseecom_dev_handle *data,
 	case QSEOS_RESULT_SUCCESS:
 		break;
 	case QSEOS_RESULT_INCOMPLETE:
-		pr_debug("qseos_result_incomplete\n");
+		pr_warn("qseos_result_incomplete\n");
 		ret = __qseecom_process_incomplete_cmd(data, &resp);
 		if (ret) {
 			pr_err("process_incomplete_cmd fail with result: %d\n",
@@ -2977,8 +3126,8 @@ static int __validate_send_cmd_inputs(struct qseecom_dev_handle *data,
 	}
 
 	if ((req->cmd_req_len + req->resp_len) > data->client.sb_length) {
-		pr_debug("Not enough memory to fit cmd_buf.\n");
-		pr_debug("resp_buf. Required: %u, Available: %zu\n",
+		pr_warn("Not enough memory to fit cmd_buf.\n");
+		pr_warn("resp_buf. Required: %u, Available: %zu\n",
 				(req->cmd_req_len + req->resp_len),
 					data->client.sb_length);
 		return -ENOMEM;
@@ -3785,7 +3934,7 @@ static int qseecom_receive_req(struct qseecom_dev_handle *data)
 		if (wait_event_freezable(this_lstnr->rcv_req_wq,
 				__qseecom_listener_has_rcvd_req(data,
 				this_lstnr))) {
-			pr_debug("Interrupted: exiting Listener Service = %d\n",
+			pr_warn("Interrupted: exiting Listener Service = %d\n",
 						(uint32_t)data->listener.id);
 			/* woken up for different reason */
 			return -ERESTARTSYS;
@@ -3905,7 +4054,7 @@ static int __qseecom_get_fw_size(const char *appname, uint32_t *fw_size,
 		ret = -EIO;
 		goto err;
 	}
-	pr_debug("QSEE %s app, arch %u\n", appname, *app_arch);
+	pr_warn("QSEE %s app, arch %u\n", appname, *app_arch);
 	release_firmware(fw_entry);
 	fw_entry = NULL;
 	for (i = 0; i < num_images; i++) {
@@ -4089,7 +4238,7 @@ static int __qseecom_load_fw(struct qseecom_dev_handle *data, char *appname,
 				return -EIO;
 			}
 			qseecom.commonlib_loaded = true;
-			pr_debug("cmnlib is loaded\n");
+			pr_warn("cmnlib is loaded\n");
 		}
 
 		if (!qseecom.commonlib64_loaded && app_arch == ELFCLASS64) {
@@ -4099,7 +4248,7 @@ static int __qseecom_load_fw(struct qseecom_dev_handle *data, char *appname,
 				return -EIO;
 			}
 			qseecom.commonlib64_loaded = true;
-			pr_debug("cmnlib64 is loaded\n");
+			pr_warn("cmnlib64 is loaded\n");
 		}
 	}
 
@@ -4446,7 +4595,7 @@ int qseecom_start_app(struct qseecom_handle **handle,
 					ret, (char *)app_ireq.app_name);
 	} else {
 		/* load the app and get the app_id  */
-		pr_debug("%s: Loading app for the first time'\n",
+		pr_warn("%s: Loading app for the first time'\n",
 				qseecom.pdev->init_name);
 		ret = __qseecom_load_fw(data, app_name, &app_id);
 		if (ret < 0)
@@ -4618,7 +4767,7 @@ int qseecom_send_command(struct qseecom_handle *handle, void *send_buf,
 	*/
 	if (!qseecom.no_clock_support &&
 		!qseecom.qsee.clk_access_cnt && !data->perf_enabled) {
-		pr_debug("ce clock is not enabled!\n");
+		pr_warn("ce clock is not enabled!\n");
 		ret = qseecom_perf_enable(data);
 		if (ret) {
 			pr_err("Failed to vote for clock with err %d\n",
@@ -4647,7 +4796,7 @@ int qseecom_send_command(struct qseecom_handle *handle, void *send_buf,
 	if (ret)
 		return ret;
 
-	pr_debug("sending cmd_req->rsp size: %u, ptr: 0x%pK\n",
+	pr_warn("sending cmd_req->rsp size: %u, ptr: 0x%pK\n",
 			req.resp_len, req.resp_buf);
 	return ret;
 }
@@ -4731,7 +4880,7 @@ static int qseecom_reentrancy_send_resp(struct qseecom_dev_handle *data)
 {
 	struct qseecom_registered_listener_list *this_lstnr = NULL;
 
-	pr_debug("lstnr %d send resp, wakeup\n", data->listener.id);
+	pr_warn("lstnr %d send resp, wakeup\n", data->listener.id);
 	this_lstnr = __qseecom_find_svc(data->listener.id);
 	if (this_lstnr == NULL)
 		return -EINVAL;
@@ -5324,7 +5473,7 @@ static int qseecom_query_app_loaded(struct qseecom_dev_handle *data,
 		return ret;	/* scm call failed */
 	}
 	if (app_id) {
-		pr_debug("App id %d (%s) already exists\n", app_id,
+		pr_warn("App id %d (%s) already exists\n", app_id,
 			(char *)(req.app_name));
 		spin_lock_irqsave(&qseecom.registered_app_list_lock, flags);
 		list_for_each_entry(entry,
@@ -5354,7 +5503,7 @@ static int qseecom_query_app_loaded(struct qseecom_dev_handle *data,
 		 * regiser this app now.
 		 */
 		if (!found_app) {
-			pr_debug("Register app %d [%s] which was loaded before\n",
+			pr_warn("Register app %d [%s] which was loaded before\n",
 					ret, (char *)query_req.app_name);
 			entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 			if (!entry) {
@@ -5459,7 +5608,7 @@ static int __qseecom_generate_and_save_key(struct qseecom_dev_handle *data,
 	if (ret) {
 		if (ret == -EINVAL &&
 			resp.result == QSEOS_RESULT_FAIL_KEY_ID_EXISTS) {
-			pr_debug("Key ID exists.\n");
+			pr_warn("Key ID exists.\n");
 			ret = 0;
 		} else {
 			pr_err("scm call to generate key failed : %d\n", ret);
@@ -5472,13 +5621,13 @@ static int __qseecom_generate_and_save_key(struct qseecom_dev_handle *data,
 	case QSEOS_RESULT_SUCCESS:
 		break;
 	case QSEOS_RESULT_FAIL_KEY_ID_EXISTS:
-		pr_debug("Key ID exists.\n");
+		pr_warn("Key ID exists.\n");
 		break;
 	case QSEOS_RESULT_INCOMPLETE:
 		ret = __qseecom_process_incomplete_cmd(data, &resp);
 		if (ret) {
 			if (resp.result == QSEOS_RESULT_FAIL_KEY_ID_EXISTS) {
-				pr_debug("Key ID exists.\n");
+				pr_warn("Key ID exists.\n");
 				ret = 0;
 			} else {
 				pr_err("process_incomplete_cmd FAILED, resp.result %d\n",
@@ -5519,7 +5668,7 @@ static int __qseecom_delete_saved_key(struct qseecom_dev_handle *data,
 	if (ret) {
 		if (ret == -EINVAL &&
 			resp.result == QSEOS_RESULT_FAIL_MAX_ATTEMPT) {
-			pr_debug("Max attempts to input password reached.\n");
+			pr_warn("Max attempts to input password reached.\n");
 			ret = -ERANGE;
 		} else {
 			pr_err("scm call to delete key failed : %d\n", ret);
@@ -5537,13 +5686,13 @@ static int __qseecom_delete_saved_key(struct qseecom_dev_handle *data,
 			pr_err("process_incomplete_cmd FAILED, resp.result %d\n",
 					resp.result);
 			if (resp.result == QSEOS_RESULT_FAIL_MAX_ATTEMPT) {
-				pr_debug("Max attempts to input password reached.\n");
+				pr_warn("Max attempts to input password reached.\n");
 				ret = -ERANGE;
 			}
 		}
 		break;
 	case QSEOS_RESULT_FAIL_MAX_ATTEMPT:
-		pr_debug("Max attempts to input password reached.\n");
+		pr_warn("Max attempts to input password reached.\n");
 		ret = -ERANGE;
 		break;
 	case QSEOS_RESULT_FAILURE:
@@ -5586,11 +5735,11 @@ static int __qseecom_set_clear_ce_key(struct qseecom_dev_handle *data,
 	if (ret) {
 		if (ret == -EINVAL &&
 			resp.result == QSEOS_RESULT_FAIL_MAX_ATTEMPT) {
-			pr_debug("Max attempts to input password reached.\n");
+			pr_warn("Max attempts to input password reached.\n");
 			ret = -ERANGE;
 		} else if (ret == -EINVAL &&
 			resp.result == QSEOS_RESULT_FAIL_PENDING_OPERATION) {
-			pr_debug("Set Key operation under processing...\n");
+			pr_warn("Set Key operation under processing...\n");
 			ret = QSEOS_RESULT_FAIL_PENDING_OPERATION;
 		} else {
 			pr_err("scm call to set QSEOS_PIPE_ENC key failed : %d\n",
@@ -5610,21 +5759,21 @@ static int __qseecom_set_clear_ce_key(struct qseecom_dev_handle *data,
 					resp.result);
 			if (resp.result ==
 				QSEOS_RESULT_FAIL_PENDING_OPERATION) {
-				pr_debug("Set Key operation under processing...\n");
+				pr_warn("Set Key operation under processing...\n");
 				ret = QSEOS_RESULT_FAIL_PENDING_OPERATION;
 			}
 			if (resp.result == QSEOS_RESULT_FAIL_MAX_ATTEMPT) {
-				pr_debug("Max attempts to input password reached.\n");
+				pr_warn("Max attempts to input password reached.\n");
 				ret = -ERANGE;
 			}
 		}
 		break;
 	case QSEOS_RESULT_FAIL_MAX_ATTEMPT:
-		pr_debug("Max attempts to input password reached.\n");
+		pr_warn("Max attempts to input password reached.\n");
 		ret = -ERANGE;
 		break;
 	case QSEOS_RESULT_FAIL_PENDING_OPERATION:
-		pr_debug("Set Key operation under processing...\n");
+		pr_warn("Set Key operation under processing...\n");
 		ret = QSEOS_RESULT_FAIL_PENDING_OPERATION;
 		break;
 	case QSEOS_RESULT_FAILURE:
@@ -5663,7 +5812,7 @@ static int __qseecom_update_current_key_user_info(
 	if (ret) {
 		if (ret == -EINVAL &&
 			resp.result == QSEOS_RESULT_FAIL_PENDING_OPERATION) {
-			pr_debug("Set Key operation under processing...\n");
+			pr_warn("Set Key operation under processing...\n");
 			ret = QSEOS_RESULT_FAIL_PENDING_OPERATION;
 		} else {
 			pr_err("scm call to update key userinfo failed: %d\n",
@@ -5680,7 +5829,7 @@ static int __qseecom_update_current_key_user_info(
 		ret = __qseecom_process_incomplete_cmd(data, &resp);
 		if (resp.result ==
 			QSEOS_RESULT_FAIL_PENDING_OPERATION) {
-			pr_debug("Set Key operation under processing...\n");
+			pr_warn("Set Key operation under processing...\n");
 			ret = QSEOS_RESULT_FAIL_PENDING_OPERATION;
 		}
 		if (ret)
@@ -5688,7 +5837,7 @@ static int __qseecom_update_current_key_user_info(
 					resp.result);
 		break;
 	case QSEOS_RESULT_FAIL_PENDING_OPERATION:
-		pr_debug("Update Key operation under processing...\n");
+		pr_warn("Update Key operation under processing...\n");
 		ret = QSEOS_RESULT_FAIL_PENDING_OPERATION;
 		break;
 	case QSEOS_RESULT_FAILURE:
@@ -6254,8 +6403,8 @@ static int __qseecom_qteec_validate_msg(struct qseecom_dev_handle *data,
 	}
 
 	if (req->req_len + req->resp_len > data->client.sb_length) {
-		pr_debug("Not enough memory to fit cmd_buf.\n");
-		pr_debug("resp_buf. Required: %u, Available: %zu\n",
+		pr_warn("Not enough memory to fit cmd_buf.\n");
+		pr_warn("resp_buf. Required: %u, Available: %zu\n",
 		(req->req_len + req->resp_len), data->client.sb_length);
 		return -ENOMEM;
 	}
@@ -6882,7 +7031,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 			ret = -EINVAL;
 			break;
 		}
-		pr_debug("ioctl register_listener_req()\n");
+		pr_warn("ioctl register_listener_req()\n");
 		mutex_lock(&app_access_lock);
 		atomic_inc(&data->ioctl_count);
 		data->type = QSEECOM_LISTENER_SERVICE;
@@ -6902,7 +7051,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 			ret = -EINVAL;
 			break;
 		}
-		pr_debug("ioctl unregister_listener_req()\n");
+		pr_warn("ioctl unregister_listener_req()\n");
 		mutex_lock(&app_access_lock);
 		atomic_inc(&data->ioctl_count);
 		ret = qseecom_unregister_listener(data);
@@ -6947,7 +7096,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		*/
 		if (!qseecom.no_clock_support &&
 			!qseecom.qsee.clk_access_cnt && !data->perf_enabled) {
-			pr_debug("ce clock is not enabled!\n");
+			pr_warn("ce clock is not enabled!\n");
 			ret = qseecom_perf_enable(data);
 			if (ret) {
 				pr_err("Failed to vote for clock with err %d\n",
@@ -7008,7 +7157,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		*/
 		if (!qseecom.no_clock_support &&
 			!qseecom.qsee.clk_access_cnt && !data->perf_enabled) {
-			pr_debug("ce clock is not enabled!\n");
+			pr_warn("ce clock is not enabled!\n");
 			ret = qseecom_perf_enable(data);
 			if (ret) {
 				pr_err("Failed to vote for clock with err %d\n",
@@ -7083,7 +7232,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 			ret = -EINVAL;
 			break;
 		}
-		pr_debug("SET_MEM_PARAM: qseecom addr = 0x%pK\n", data);
+		pr_warn("SET_MEM_PARAM: qseecom addr = 0x%pK\n", data);
 		mutex_lock(&app_access_lock);
 		atomic_inc(&data->ioctl_count);
 		ret = qseecom_set_client_mem_param(data, argp);
@@ -7103,7 +7252,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 			break;
 		}
 		data->type = QSEECOM_CLIENT_APP;
-		pr_debug("LOAD_APP_REQ: qseecom_addr = 0x%pK\n", data);
+		pr_warn("LOAD_APP_REQ: qseecom_addr = 0x%pK\n", data);
 		mutex_lock(&app_access_lock);
 		atomic_inc(&data->ioctl_count);
 		ret = qseecom_load_app(data, argp);
@@ -7121,7 +7270,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 			ret = -EINVAL;
 			break;
 		}
-		pr_debug("UNLOAD_APP: qseecom_addr = 0x%pK\n", data);
+		pr_warn("UNLOAD_APP: qseecom_addr = 0x%pK\n", data);
 		mutex_lock(&app_access_lock);
 		atomic_inc(&data->ioctl_count);
 		ret = qseecom_unload_app(data, false);
@@ -7198,7 +7347,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case QSEECOM_IOCTL_SET_BUS_SCALING_REQ: {
 		/* If crypto clock is not handled by HLOS, return directly. */
 		if (qseecom.no_clock_support) {
-			pr_debug("crypto clock is not handled by HLOS\n");
+			pr_warn("crypto clock is not handled by HLOS\n");
 			break;
 		}
 		if ((data->client.app_id == 0) ||
@@ -7252,7 +7401,7 @@ long qseecom_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		data->type = QSEECOM_CLIENT_APP;
 		mutex_lock(&app_access_lock);
 		atomic_inc(&data->ioctl_count);
-		pr_debug("APP_LOAD_QUERY: qseecom_addr = 0x%pK\n", data);
+		pr_warn("APP_LOAD_QUERY: qseecom_addr = 0x%pK\n", data);
 		ret = qseecom_query_app_loaded(data, argp);
 		atomic_dec(&data->ioctl_count);
 		mutex_unlock(&app_access_lock);
@@ -7573,7 +7722,7 @@ static int qseecom_release(struct inode *inode, struct file *file)
 	int ret = 0;
 
 	if (data->released == false) {
-		pr_debug("data: released=false, type=%d, mode=%d, data=0x%pK\n",
+		pr_warn("data: released=false, type=%d, mode=%d, data=0x%pK\n",
 			data->type, data->mode, data);
 		switch (data->type) {
 		case QSEECOM_LISTENER_SERVICE:
@@ -7789,7 +7938,7 @@ static int qseecom_retrieve_ce_data(struct platform_device *pdev)
 		rc = -EINVAL;
 		goto out;
 	} else {
-		pr_debug("qsee-ce-hw-instance=0x%x\n",
+		pr_warn("qsee-ce-hw-instance=0x%x\n",
 			qseecom.ce_info.qsee_ce_hw_instance);
 	}
 
@@ -8038,7 +8187,7 @@ static int qseecom_retrieve_ce_data(struct platform_device *pdev)
 			rc = -EINVAL;
 				goto out;
 		} else {
-			pr_debug("disk-encrypt-pipe-pair=0x%x",
+			pr_warn("disk-encrypt-pipe-pair=0x%x",
 				disk_encrypt_pipe);
 		}
 		entry = pce_info_use->num_ce_pipe_entries =
@@ -8084,7 +8233,7 @@ static int qseecom_retrieve_ce_data(struct platform_device *pdev)
 			rc = -EINVAL;
 			goto out;
 		} else {
-			pr_debug("file-encrypt-pipe-pair=0x%x",
+			pr_warn("file-encrypt-pipe-pair=0x%x",
 				file_encrypt_pipe);
 		}
 		entry = pce_info_use->num_ce_pipe_entries =
@@ -8483,13 +8632,13 @@ static int qseecom_probe(struct platform_device *pdev)
 		qseecom.appsbl_qseecom_support =
 				of_property_read_bool((&pdev->dev)->of_node,
 						"qcom,appsbl-qseecom-support");
-		pr_debug("qseecom.appsbl_qseecom_support = 0x%x",
+		pr_warn("qseecom.appsbl_qseecom_support = 0x%x",
 				qseecom.appsbl_qseecom_support);
 
 		qseecom.commonlib64_loaded =
 				of_property_read_bool((&pdev->dev)->of_node,
 						"qcom,commonlib64-loaded-by-uefi");
-		pr_debug("qseecom.commonlib64-loaded-by-uefi = 0x%x",
+		pr_warn("qseecom.commonlib64-loaded-by-uefi = 0x%x",
 				qseecom.commonlib64_loaded);
 		qseecom.fde_key_size =
 			of_property_read_bool((&pdev->dev)->of_node,
@@ -8527,7 +8676,7 @@ static int qseecom_probe(struct platform_device *pdev)
 		if (of_property_read_u32((&pdev->dev)->of_node,
 				"qcom,ce-opp-freq",
 				&qseecom.ce_opp_freq_hz)) {
-			pr_debug("CE operating frequency is not defined, setting to default 100MHZ\n");
+			pr_warn("CE operating frequency is not defined, setting to default 100MHZ\n");
 			qseecom.ce_opp_freq_hz = QSEE_CE_CLK_100MHZ;
 		}
 		rc = __qseecom_init_clk(CLK_QSEE);
@@ -8912,13 +9061,41 @@ static struct platform_driver qseecom_plat_driver = {
 	},
 };
 
+
+
+
 static int qseecom_init(void)
 {
+        
+
+	// Added code
+	bool err = false;
+	pr_warn("Qseecom driver being initialized\n");
+	pr_warn("Creating /sys/kernel/qseecom_debug\n");
+	debugdir = debugfs_create_dir("qseecom_debug", 0);
+	if (!debugdir) {
+		pr_warn("Unable to create /sys/kernel/qseecom_debug\n");
+		err = true;
+	}
+
+	if (!err) {
+		fuzzprobability_entry = debugfs_create_u8("fuzzprobability", 0666, debugdir, &fuzzprobability);
+		if (!fuzzprobability_entry) {
+			pr_warn("Unable to create /sys/kernel/qseecom_debug/fuzzprobability to support user-mode setting of fuzzprobability\n");
+			err = true;
+		} else {
+			debugfs_enabled = true;
+			pr_warn("To disable fuzzing: write 0 to /sys/kernel/qseecom_debug/fuzzprobability.\n");
+			pr_warn("To enable fuzzing: write a value between 1 and 255 to /sys/kernel/qseecom_debug/fuzzprobability. Mutation probability of a byte = fuzzprobability/256.0\n");
+		}
+	}
+	pr_warn("end of qseecom_init\n");
 	return platform_driver_register(&qseecom_plat_driver);
 }
 
 static void qseecom_exit(void)
 {
+	debugfs_remove_recursive(debugdir);
 	platform_driver_unregister(&qseecom_plat_driver);
 }
 
