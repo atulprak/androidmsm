@@ -1,0 +1,35 @@
+cd kernelmarlin:/ #                                                                                                                                                                     
+marlin:/ # cd kernelmarlin:/ #                                                                                                                                                                     cd /sys/ken rnmarlin:/ # cd /sys/kernel/                                                                                                                                                     debmarlin:/ # cd /sys/kernel/debug/                                                                                                                                               
+marlin:/sys/kernel/debug # ls
+6a00000.dwc3                       debug              ipa              msm_isp1         qpnp_pin          smd                                    tcpm               
+7575000.spi                        debug_enabled      ipc_logging      msm_perf         qseecom_debug     smem                                   test_servloc       
+757a000.spi                        diag               kgsl             msm_serial_hs    regmap            smmu-bus-client-d00000.arm,smmu-mdp    tfa98xx-34         
+afe_loopback                       dma_buf            kryo-regulator   msm_serial_hsl   regulator         smmu-bus-client-d20000.arm,smmu-rot    tracing            
+afe_loopback_gain                  extfrag            l2tp             msm_subsys       rmt_storage       smmu-bus-client-d40000.arm,smmu-venus  tsens              
+android_verity                     fault_around_bytes lmh_monitor      msm_thermal      rpm_heap          smmu-bus-client-d60000.arm,smmu-cpp_fd tzdbg              
+asoc                               fg_memif           lpm_stats        msm_vidc         rpm_log           smmu-bus-client-d80000.arm,smmu-jpeg   ufshcd0            
+audio_in_latency_measurement_node  flashLED           mdp              pci-msm          rpm_master_stats  smmu-bus-client-da0000.arm,smmu-vfe    usb                
+audio_out_latency_measurement_node ghsic_ctrl_xport   mdss_panel_fb0   perf_debug_tp    rpm_rail_stats    smp2p                                  usb_diag           
+bdi                                ghsic_data_xport   measure          pinctrl          rpm_send_msg      smp2p_test                             usb_gsi            
+binder                             glink              memblock         pwm              rpm_stats         smsm                                   usb_mtp            
+bluetooth                          gpio               msm-apm          qcedev           sched_features    soc:devfreq_spdm_cpu                   usb_qti            
+camera                             hid                msm-bus-dbg      qcota            scm_errata        spmi                                   usb_rmnet_ctrl_smd 
+clk                                ieee80211          msm-perf-patches qcrypto          service_notifier  sps                                    vmem               
+cma                                iio                msm_cpp          qpnp-power-on-11 show_mem_notifier suspend_stats                          wakeup_sources     
+cnss-prealloc                      iommu              msm_ipc_router   qpnp-power-on-2  sleep_time        sync                                   wcd9xxx_core       
+cpr3-regulator                     ion                msm_isp0         qpnp-smbcharger  smb1351_slave     system_stats                           wcd_cpe            
+marlin:/sys/kernel/debug # cd qsemarlin:/sys/kernel/debug # cd qseecom_debug/                                                                                                                                   
+marlin:/sys/kernel/debug/qseecom_debug # ls
+fuzzflag
+marlin:/sys/kernel/debug/qseecom_debug # cat fuzzmarlin:/sys/kernel/debug/qseecom_debug # cat fuzzflag                                                                                                                           
+0
+marlin:/sys/kernel/debug/qseecom_debug # cat 1 > marlin:/sys/kernel/debug/qseecom_debug #                                                                                                                                       echo 1 > fuzzflag
+marlin:/sys/kernel/debug/qseecom_debug # 
+marlin:/sys/kernel/debug/qseecom_debug # dmesg -n 8
+[0mmarlin:/sys/kernel/debug/qseecom_debug # # Now we will launch the modified BasicAndroidKeyStore app from the phone. That creates ke  RSA key repeat       , signs a mesag s  s      message, and verifies it  , reunch the modified BasicAndroidKeyStore app from the phone. That creates RSA key, signs a message, and verifies it, re                                                         <peatedly.
+marlin:/sys/kernel/debug/qseecom_debug # 
+marlin:/sys/kernel/debug/qseecom_debug # 
+marlin:/sys/kernel/debug/qseecom_debug # more fuzzflag
+1
+marlin:/sys/kernel/debug/qseecom_debug # 
+marlin:/sys/kernel/debug/qseecom_debug # [?2004hatulp@atulp3:~/src/msm$ 
