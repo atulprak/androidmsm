@@ -1,5 +1,7 @@
 <h2>Building and installing a custom kernel from public sources on Pixel 2 ("walleye")</h2>
 
+Atul Prakash
+
 One can find instructions for building from Android Open Source for various devices [here](https://source.android.com/setup/building).  Nevertheless, these instructions can be helpful if you are building a custom kernel for the newer phones such as Pixel 2, as some of the steps differ from what worked for Pixel phones in details. The instructions consist of three parts: (1) Updating the bootloader and baseband firmware; (2) Making sure that AOSP builds and works to create a working baseline with a prebuilt kernel; and (3) Building an unmodified kernel from sources and making sure that works to create another working baseline. Once (3) is accomplished, then it should be straightforward to customize that kernel. The first two steps are similar to those for devices such as Pixel. Step (3) differs in several ways from Pixel. 
 
 <h2>Update to the latest Bootloader and baseband firmware</h2>
@@ -86,6 +88,8 @@ git checkout branchname
 
 It may be helpful to adb into the device, become root, and issue the following:
 
-# dmesg -n 8
-
+```
+dmesg -n 8
+```
 This turns on more detailed debug messages --- those that are printed by pr_debug. Then, use available ways to see kernel messages for the Linux Kernel and Android.
+
